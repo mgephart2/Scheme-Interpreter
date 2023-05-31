@@ -1,0 +1,589 @@
+#lang eopl
+
+
+
+;INITIAL ENV
+;----------------------
+(define identifier? symbol?)
+
+(define init-env
+  (lambda()
+    (extend-env 'add
+                (proc-val (primitive 'add))
+    (extend-env 'sub
+                (proc-val (primitive 'sub))
+    (extend-env 'mul
+                (proc-val (primitive 'mul))
+    (extend-env 'div
+                (proc-val (primitive 'div))
+    (extend-env 'mod
+                (proc-val (primitive 'mod))
+    (extend-env 'equal
+                (proc-val (primitive 'equal))
+    (extend-env 'lesser
+                (proc-val (primitive 'lesser))
+    (extend-env 'greater
+                (proc-val (primitive 'greater))
+    (extend-env 'and
+                (proc-val (primitive 'and))
+    (extend-env 'or
+                (proc-val (primitive 'or))
+    (extend-env 'xor
+                (proc-val (primitive 'xor))
+                (empty-env))))))))))))))
+
+
+;SCANNER
+;----------------------
+(define scanner-spec
+  '((white-sp    (whitespace)  skip)
+    (comment     ("%" (arbno (not #\newline))) skip)
+    (identifier  (letter (arbno (or letter digit "_" "?" "*"))) symbol)
+    (number      (digit (arbno digit)) number)
+    (true ((or "true" "#t")) symbol)
+    (false ((or "false" "#f")) symbol)))
+
+;GRAMMAR DEFINITIONS
+;----------------------
+(define grammar
+  '(;(prog (exp) a-program)
+    (prog (stmt) a-program) ;statements can include expressions
+    
+    (stmt (identifier "=" exp) assign-stmt) 
+    (stmt ("print" exp) print-stmt) 
+    (stmt ("{" (arbno stmt ";") "}" ) compound-stmt)  
+    (stmt ("if" exp "then" stmt "else" stmt) if-stmt) 
+    (stmt ("while" exp "do" stmt) while-stmt) 
+    (stmt ("var" (arbno identifier "=" exp ",") ";" stmt) block-stmt) 
+    
+    (exp   (number) const-exp) 
+    (exp   (identifier) var-exp) 
+    (exp   ("(" in-exp ")") in-exp2) 
+    (exp   (true) true-exp)
+    (exp   (false) false-exp) 
+    
+    (in-exp   ("if" exp exp exp) if-exp)
+    (in-exp   ("let" "("( arbno  "(" identifier exp ")" ) ")" exp ) let-exp)
+    (in-exp   ("cond" "(" (arbno exp exp ")" "(") "else" exp ")") cond-exp)  
+    (in-exp   ("lambda" "(" (arbno identifier ":" type-exp) ")" exp) proc-exp)  ;NEW
+    (in-exp   ("let*" "(" (arbno "(" identifier exp ")" ) ")" exp) let*-exp) 
+    (in-exp   ("letrec" "(" (arbno "(" type-exp identifier "(" "lambda" "(" (arbno identifier) ")" type-exp ")" exp ")" ")" ) ")" exp) letrec-exp) ;NEW
+    (in-exp   ("car" exp) car-exp) 
+    (in-exp   ("cdr" exp) cdr-exp)  
+    (in-exp   ("cons" exp exp) cons-exp)  
+    (in-exp   ("list" (arbno exp)) list-exp) 
+    (in-exp   ("null?" exp) null?-exp) 
+    (in-exp   ("emptylist" type-exp) empty-exp) ;NEW
+    (in-exp   (exp (arbno exp)) call-exp)
+
+    (type-exp ("int") int-type-exp)  ;NEW
+    (type-exp ("bool") bool-type-exp)  ;NEW
+    (type-exp ("(" (arbno type-exp "*") "->" type-exp ")") arrow-type-exp)  ;NEW
+    (type-exp ("listof" type-exp) list-type-exp)))  ;NEW
+ 
+              
+
+(define scan&parse (sllgen:make-string-parser scanner-spec grammar))
+(sllgen:make-define-datatypes scanner-spec grammar)
+
+;PROCEDURE API
+;----------------------
+(define-datatype proc proc?
+  (procedure
+   (vars (list-of identifier?)) ;change to take multiple parameters
+   (body exp?)   ;SLLGEN AST class defined/genreated in grammar
+   (saved-env env?))
+  (primitive       ;used for +, -, *, /, and, or, xor, %, <, >
+   (type symbol?)))
+
+
+(define apply-proc
+  (lambda (proc1 args)
+    (cases proc proc1
+      (procedure (vars body saved-env)
+                 (value-of body (extend-env vars (newref args) saved-env)))
+      (primitive (type)
+                 (cond
+                   ((eqv? type 'add) (num-val (+ (expval->num (car args)) (expval->num (cadr args))))) ;checks if primitive type 'add equals literal +
+                   ((eqv? type 'sub) (num-val (- (expval->num (car args)) (expval->num (cadr args)))))
+                   ((eqv? type 'mul) (num-val (* (expval->num (car args)) (expval->num (cadr args)))))
+                   ((eqv? type 'div) (num-val (truncate(/ (expval->num (car args)) (expval->num (cadr args))))))
+                   ((eqv? type 'mod)  (num-val (modulo (expval->num (car args)) (expval->num (cadr args)))))
+                   ((eqv? type 'equal)  (bool-val (= (expval->num (car args)) (expval->num (cadr args)))))
+                   ((eqv? type 'lesser)  (bool-val (< (expval->num (car args)) (expval->num (cadr args)))))
+                   ((eqv? type 'greater)  (bool-val (> (expval->num (car args)) (expval->num (cadr args)))))
+                   ((eqv? type 'and)  (bool-val (and (expval->boolexp (car args)) (expval->boolexp (cadr args)))))
+                   ((eqv? type 'or)  (bool-val (or (expval->boolexp (car args)) (expval->boolexp (cadr args)))))
+                   ((eqv? type 'xor)  (bool-val (and (or (expval->boolexp (car args)) (expval->boolexp (cadr args)))
+                                           (not (and (expval->boolexp (car args)) (expval->boolexp (cadr args)))))))
+                   (else (eopl:error 'apply-proc "ERROR")))))))
+
+
+;ENVIRONMENT API          
+;----------------------        
+(define-datatype env env?
+  (empty-env)
+  (extend-env
+          (var (list-of symbol?))   
+          (val expval?)            
+          (tail env?))           
+  (extend-env-rec
+          (p-name (list-of symbol?))
+          (b-var list?)
+          (body list?)
+          (tail env?)))
+
+(define extend-env-rec-helper
+  (lambda (env s p-name b-var body tail)
+    (if (null? p-name)
+        (apply-env tail s)
+        (if (eqv? s (car p-name))
+                  (proc-val (procedure (car b-var) (car body) env))
+                  (extend-env-rec-helper env s (cdr p-name) (cdr b-var) (cdr body) tail)))))
+              
+(define apply-env
+  (lambda (env1 s)
+    (cases env env1
+      [empty-env () ('error)]
+      [extend-env (var val env-exp)
+                  (if (eqv? s var)
+                      val
+                      (apply-env env-exp s))]
+      [extend-env-rec (p-name b-var body tail)
+                      (extend-env-rec-helper env1 s p-name b-var body tail)]))) ;if x in p-name return a new closure with correct id, body, and env
+                                                                                ;else recursively apply-env on env-exp (tail)
+
+
+
+
+;EXPRESSED VALUES DATA STRUCTURE
+;-----------------------------------
+(define-datatype expval expval?
+  (num-val
+   (number number?))
+  (bool-val
+   (boolexp boolean?))
+  (proc-val
+   (proc proc?))
+  (sexp-val          ;creating an internal representation of S-expressions based on a define-datatype of your design; 
+   (s-exp list?))    ;for "unwrapping"; operating over your internal representation
+  (ref-val
+   (ref reference?)))
+
+(define expval->num
+  (lambda (val)
+    (cases expval val
+      (num-val (number) number)
+      (else (eopl:error `expval-num "ERROR" val))))) 
+
+(define expval->boolexp
+  (lambda (val)
+    (cases expval val
+      (bool-val (boolexp) boolexp)
+      (else (eopl:error `expval-boolexp "ERROR" val)))))
+
+(define expval->proc
+  (lambda (val)
+    (cases expval val
+      (proc-val (proc) proc)
+      (else (eopl:error 'expval-proc "ERROR" val)))))
+
+(define expval->sexp
+  (lambda (val)
+    (cases expval val
+      (sexp-val (s-exp) s-exp)
+      (else (eopl:error 'expval->sexp "ERROR" val)))))
+
+(define expval->ref
+  (lambda (val)
+    (cases expval val
+      (ref-val (ref) ref)
+      (else (eopl:error 'expval->ref "ERROR" val)))))
+
+
+;INTERPRETER 
+;------------------------------
+(define run
+  (lambda (string)
+    (value-of-program (scan&parse string))))
+
+(define value-of-program
+  (lambda (pgm)
+    (initialize-store!)
+    (cases prog pgm
+      (a-program (stmt) ;changed to match new a-program
+                (value-of-stmt stmt (init-env)))))) 
+
+(define value-of
+  (lambda (exp1 env)
+    (cases exp exp1
+      (const-exp (num) num)
+      (true-exp (true) (bool-val #t))
+      (false-exp (false) (bool-val #f))
+      (var-exp (identifier) (cases expval (apply-env exp1)
+                              (num-val (num) (num-val num))
+                              (bool-val (bool) (bool-val bool))
+                              (proc-val (proc) (proc-val proc))
+                              (sexp-val (s-exp) (sexp-val s-exp))
+                              (ref-val (ref) (deref (ref-val ref)))))
+      (in-exp2 (exp1) (cases in-exp exp1
+                       (if-exp (boolexp e1 e2) 
+                               (let ((val1 (value-of boolexp env)))
+                                 (if (expval->boolexp val1)
+                                     (value-of e1 env)
+                                     (value-of e2 env))))
+                        (let-exp (var e1 body)
+                                 (let ((val1 (value-of e1 env)))
+                                   (value-of body
+                                             (extend-env var val1 env))))
+                        (cond-exp (e1 e2 else-exp)
+                                  (value-of e1 e2 else-exp env))
+                        (proc-exp (var types body)
+                                  (proc-val (procedure var body env))) 
+                        (let*-exp (vars exprs body)
+                                  (let*-helper vars exprs body env)) ;let*-helper BELOW
+                        (letrec-exp (p-result-types p-names b-vars b-vars-types p-bodies letrec-body)
+                                    (value-of letrec-body (extend-env-rec p-names b-vars p-bodies env)))
+                        (cons-exp (var e1)
+                                  (sexp-val (cons (value-of var env) (expval->sexp (value-of e1 env)))))
+                        (car-exp (e1)
+                                 (car (expval->sexp (value-of e1 env))))
+                        (cdr-exp (e1)
+                                 (sexp-val (cdr (expval->sexp (value-of e1 env))))) 
+                        (list-exp (e1)
+                                  (sexp-val (value-of e1 env)))
+                        (null?-exp (e1)
+                                   (bool-val (null? (expval->sexp (value-of e1 env)))))
+                        (empty-exp (e1)
+                                   (sexp-val '())) 
+                        (call-exp (rator rand)
+                                  (let ((proc (expval->proc (value-of rator env)))
+                                        (arg (value-of rand env)))
+                                    (apply-proc proc arg))))))))
+
+(define value-of-stmt
+  (lambda (statement env)
+    (cases stmt statement
+      (assign-stmt (var rhs)
+                   (setref! (apply-env env var) (value-of rhs env)))
+      (print-stmt (exp)
+                  (cases expval (value-of exp env)
+                         (num-val (num) (display num))
+                         (bool-val (bool) (display bool))
+                         (proc-val (proc) (display proc))
+                         (sexp-val (s-exp) (display (print-sexp s-exp)))
+                         (ref-val (ref) (display (deref ref))))
+                  (display "\n"))
+      (compound-stmt (stmts) (compound-helper stmts env))
+      (if-stmt (test-exp then-stmt else-stmt) (if (expval->boolexp (value-of test-exp env)) (value-of-stmt then-stmt env)
+                                                  (value-of-stmt else-stmt env)))
+      (while-stmt (test-exp body-stmt) (while-stmt-helper test-exp body-stmt env))
+      (block-stmt (vars init-exps body-stmt) (block-stmt-helper vars init-exps body-stmt env))
+      )))
+
+(define print-sexp
+  (lambda (s-exp)
+    (if (null? s-exp) '()
+        (cases expval (car s-exp)
+          (num-val (num) (cons num (print-sexp (cdr s-exp))))
+          (bool-val (bool) (cons bool (print-sexp (cdr s-exp))))
+          (proc-val (proc) (cons proc (print-sexp (cdr s-exp))))
+          (ref-val (ref) (cons (deref ref) (print-sexp (cdr s-exp))))
+          (sexp-val (inner-sexp) (cons (print-sexp inner-sexp) (print-sexp (cdr s-exp)))) )
+     )))
+
+(define compound-helper
+  (lambda (stmts env)
+    (if (null? stmts) '()
+        (begin (value-of-stmt (car stmts) env) (compound-helper (cdr stmts) env)))))
+
+(define while-stmt-helper
+  (lambda (test-exp body-stmt env)
+    (if (expval->boolexp (value-of test-exp env)) (begin (value-of-stmt body-stmt env) (while-stmt-helper test-exp body-stmt env))
+        'end-of-while-loop)))
+
+(define block-stmt-helper
+  (lambda (vars exps body-stmt env)
+    (if (null? vars) (value-of-stmt body-stmt env)
+        (block-stmt-helper (cdr vars) (cdr exps) body-stmt (extend-env (car vars) (ref-val (newref (value-of (car exps) env))) env))
+    )))
+
+
+;let*-helper
+(define let*-helper
+  (lambda (vars vals body env)
+    (if (null? vars) (value-of body env)
+        (let*-helper (cdr vars) (cdr vals) body (extend-env (car vars) (value-of (car vals) env) env))
+        )))
+
+
+; STORE
+;-----------------------
+(define empty-store
+  (lambda () '()))
+
+(define the-store
+  'uninitialized)
+
+(define initialize-store!
+  (lambda ()
+    (set! the-store (empty-store))))
+
+(define reference?
+  (lambda (val)
+    (integer? val)))
+
+(define newref
+  (lambda (val)
+    (let ([next-ref (length the-store)])
+      (set! the-store (append the-store (list val)))
+      next-ref)))
+
+(define deref
+  (lambda (ref)
+    (list-ref the-store ref)))
+
+(define setref!
+  (lambda (ref val)
+    (set! the-store
+          (letrec
+              ((setref-inner ;returns a list like store1, except that postion ref1 contains val
+                (lambda (store1 store2)
+                  (cond
+                    ((null? store1)
+                     ;(report-invalid-reference ref the-store)) -->> ERROR report-invalid-reference: unbound identifier in: report-invalid-reference
+                     (eopl:error 'report-invalid-ref "ERROR"))
+                    ((zero? ref)
+                     (cons val (cdr store1)))
+                    (else
+                     (cons (car store1) (setref-inner (cdr store1) (- ref 1))))))))
+            (setref-inner the-store ref)))))
+
+
+
+;TYPE ENVIRONMENT API
+;---------------------------------
+(define-datatype type type?
+  (void-type)
+  (base-type (name symbol?)) ;int or bool
+  (arrow-type
+   (params (list-of type?))
+   (result type?))
+  (list-type
+   (l-type type?)))
+
+(define int-type (lambda () (base-type 'int)))
+(define bool-type (lambda () (base-type 'bool)))
+
+(define-datatype type-env type-env?
+  (empty-tenv)
+  (extend-tenv
+   (var identifier?)
+   (type type?)
+   (tail type-env?)))
+
+(define extend-tenv-list
+  (lambda (vars vals tenv)
+    (if (null? vars) tenv
+        (extend-tenv-list (cdr vars) (cdr vals) (extend-tenv (car vars) (car vals) tenv)))))
+
+(define apply-tenv
+  (lambda (var tenv)
+    (cases type-env tenv
+      (empty-tenv () (eopl:error 'apply-tenv "ERROR"))
+      (extend-tenv (id type tail) (if (equal? id var)
+                                      type
+                                      (apply-tenv var tail))))))
+
+(define init-tenv
+  (lambda ()
+    (extend-tenv 'add (arrow-type (list (int-type) (int-type)) (int-type))
+    (extend-tenv 'sub (arrow-type (list (int-type) (int-type)) (int-type))
+    (extend-tenv 'mul (arrow-type (list (int-type) (int-type)) (int-type))
+    (extend-tenv 'div (arrow-type (list (int-type) (int-type)) (int-type))
+    (extend-tenv 'mod (arrow-type (list (int-type) (int-type)) (int-type))
+    (extend-tenv 'equal (arrow-type (list (int-type) (int-type)) (bool-type))
+    (extend-tenv 'lesser (arrow-type (list (int-type) (int-type)) (bool-type))
+    (extend-tenv 'greater (arrow-type (list (int-type) (int-type)) (bool-type))
+    (extend-tenv 'and (arrow-type (list (bool-type) (bool-type)) (bool-type))
+    (extend-tenv 'or (arrow-type (list (bool-type) (bool-type)) (bool-type))
+    (extend-tenv 'xor (arrow-type (list (bool-type) (bool-type)) (bool-type))
+    (empty-tenv))))))))))))))
+
+
+;CHECK TYPE EQUALITY
+;--------------------------------
+(define check-equal-type!
+  (lambda (t1 t2 exp)
+    (if (not (equal? t1 t2))
+        (report-unequal-types t1 t2 exp)
+        (if (or (equal? (void-type) t1) (equal? (void-type) t2))
+            (eopl:error 'void-type-error "ERROR: void type" exp) #t))))
+
+(define check-equal-type-list!
+  (lambda (t1 t1-lst exps)
+    (if (null? t1-lst) '()
+        (begin (check-equal-type! t1 (car t1-lst) (car exps)) (check-equal-type-list! t1 (cdr t1-lst) (cdr exps))))))
+
+(define check-equal-type-args!
+  (lambda (param-types arg-types exp)
+    (if (or (null? param-types) (null? arg-types))
+        (if (and (null? param-types) (null? arg-types)) '()
+            (eopl:error 'incorrect-num-of-args "ERROR: wrong num args" exp))
+        (begin (check-equal-type! (car param-types) (car arg-types) exp)
+               (check-equal-type-args! (cdr param-types) (cdr arg-types) exp)))))
+
+(define report-unequal-types
+  (lambda (t1 t2 exp)
+    (eopl:error 'check-equal-type!
+                "Types didn't match"
+                (type-to-external-form t1)
+                (type-to-external-form t2)
+                exp)))
+
+
+;PRINT FOR TYPES
+;--------------------------------
+(define type-to-external-form
+  (lambda (t1)
+    (cases type t1
+      (void-type () 'void)
+      (base-type (name) name)
+      (arrow-type (arg-types result-type) (list (type-to-external-form-arrow arg-types) '-> (type-to-external-form result-type)))
+      (list-type (type) (list 'listof (type-to-external-form type))))))
+
+(define type-to-external-form-arrow
+  (lambda (arg-types)
+    (cond
+      ((null? arg-types) '())
+      ((null? (cdr arg-types)) (list (type-to-external-form (car arg-types))))
+      (else (cons (type-to-external-form (car arg-types)) (cons '* (type-to-external-form-arrow (cdr arg-types)))))
+      )))
+
+
+
+;CHECK TYPE-OF
+;--------------------------------
+(define typecheck
+  (lambda (string)
+    (cases prog (scan&parse string)
+      (a-program (stmt) (type-to-external-form (type-of stmt (init-tenv)))))))
+
+
+(define type-of
+  (lambda (struct tenv)
+    (cond
+      ((type-exp? struct)
+       (cases type-exp struct
+         (int-type-exp () (int-type))
+         (bool-type-exp () (bool-type))
+         (arrow-type-exp (in out) (arrow-type (type-of in tenv) (type-of out tenv)))
+         (list-type-exp (ty) (list-type (type-of ty)))))
+      ((stmt? struct)
+       (cases stmt struct
+         (print-stmt (exp) (type-of exp tenv))
+         (assign-stmt (left-hs right-hs) (check-equal-type! (apply-env left-hs tenv) (type-of right-hs tenv))
+                      (void-type))
+         (compound-stmt (stmts) (list-type-of stmts tenv)
+                        (void-type))
+         (if-stmt (test-exp then-stmt else-stmt)
+                  (check-equal-type! (type-of test-exp tenv) (bool-type) test-exp)
+                  (type-of then-stmt tenv)
+                  (type-of else-stmt tenv)
+                  (void-type))
+         (while-stmt (test-exp body-stmt)
+                     (check-equal-type! (type-of test-exp tenv) (bool-type))
+                     (type-of body-stmt tenv)
+                     (void-type))
+         (block-stmt (vars init-exps body-stmt)
+                     (type-of body-stmt (extend-tenv-list vars (map (lambda (e) (type-of e tenv)) init-exps) tenv))
+                     (void-type))))
+      ((exp? struct)
+       (cases exp struct
+         (const-exp (num) (int-type))
+         (true-exp (true) (bool-type))
+         (false-exp (false) (bool-type))
+         (var-exp (var) (apply-tenv var tenv))
+         (in-exp2 (inner) (type-of inner tenv))))
+      ((in-exp? struct)
+       (cases in-exp struct
+         (if-exp (e1 e2 e3)
+                 (let ((t1 (type-of e1 tenv))
+                       (t2 (type-of e2 tenv))
+                       (t3 (type-of e3 tenv)))
+                   (check-equal-type! t1 (bool-type) e1)
+                   (check-equal-type! t2 t3 struct) t2))
+         (let-exp (var e1 body)
+                  (let ((exp1-type (type-of e1 tenv)))
+                    (type-of body
+                             (extend-tenv var exp1-type tenv))))
+         (cond-exp (checks exprs else-exp)
+                   (check-equal-type-list! (bool-type)
+                                           (map (lambda (x) (type-of x tenv)) checks)
+                                           checks)
+                   (check-equal-type-list! (type-of else-exp tenv)
+                                           (map (lambda (x) (type-of x tenv)) exprs)
+                                           exprs)
+                   (type-of else-exp tenv))
+         (proc-exp (vars type body)
+                     (let ((tys (list-type-of type tenv)))
+                       (arrow-type tys (type-of body (extend-tenv-list vars tys tenv)))))
+         (let*-exp (vars vals body)
+                   (type-of body
+                            (extend-tenv-list vars (map (lambda (e) (type-of e tenv)) vals) tenv)))
+         (letrec-exp (p-result-type p-names b-vars b-vars-type p-bodies letrec-body)
+                     (let ((tenv-for-letrec-body
+                            (extend-tenv-list p-names
+                                              (letrec-body-helper b-vars-type p-result-type tenv)
+                                              tenv)))
+                       (let ((p-body-type 
+                              (type-of p-bodies 
+                                       (letrec-pbody-type-helper b-vars b-vars-type p-bodies tenv-for-letrec-body tenv))))
+                         (map check-equal-type! p-body-type p-result-type p-bodies)
+                         (type-of letrec-body tenv-for-letrec-body))))
+         (car-exp (exp)
+                  (cases type (type-of exp tenv)
+                    (list-type (l-type) l-type)
+                    (else (eopl:error 'car-invalid-arg "ERROR: arg not in list" exp))))
+         (cdr-exp (exp)
+                  (cases type (type-of exp tenv)
+                    (list-type (l-type) (list-type l-type))
+                    (else (eopl:error 'cdr-invalid-arg "ERROR: arg of not in list" exp))))
+         (cons-exp (var exp)
+                   (cases type (type-of exp tenv)
+                     (list-type (l-type) (check-equal-type! l-type (type-of var tenv))
+                                (list-type l-type))
+                     (else (eopl:error 'cons-invalid-arg "ERROR: arg not in list" exp))))
+         (list-exp (exps)
+                   (check-equal-type-list! (type-of (car exps) tenv) (list-type-of (cdr exps) tenv) (cdr exps))
+                   (list-type (type-of (car exps) tenv)))
+         (null?-exp (exp)
+                    (cases type (type-of exp tenv)
+                      (list-type (l-type) (bool-type))
+                      (else (eopl:error 'cnull?-invalid-arg "ERROR: arg is not list" exp))))
+         (empty-exp (empty-lst-type)
+                    (list-type (type-of empty-lst-type tenv)))
+         (call-exp (rator rands) (cases type (type-of rator tenv)
+                                   (arrow-type (params result)
+                                               (check-equal-type-args! params
+                                                                       (map (lambda (e) (type-of e tenv)) rands) struct) result)
+                                   (else (eopl:error 'rator-not-proc "ERROR: not an arrow-type" rator)))))))))
+
+(define list-type-of
+  (lambda (lst tenv)
+    (if (null? lst) '()
+    (cons (type-of (car lst) tenv) (list-type-of (cdr lst) tenv)))))
+
+(define letrec-body-helper
+  (lambda (b-vars-types p-result-type tenv)  
+    (map (lambda (e1 e2) (arrow-type (map  (lambda (e) (type-of e tenv) )e1)   (type-of e2 tenv))) b-vars-types p-result-type)))
+
+(define letrec-pbody-type-helper
+  (lambda (b-vars b-vars-types p-body t-env-for-letrec-body tenv)
+    (map (lambda (e1 e2 e3) (type-of e3 (extend-tenv-list e1 (map  (lambda (e) (type-of e tenv) )e2) t-env-for-letrec-body)))
+                  b-vars b-vars-types p-body)))
+                       
+                           
+;------------------------------------------------------------------------------------------------------------
+
+(provide scan&parse run typecheck)
