@@ -1,9 +1,9 @@
 ;COSC 3410 - Project #8
 ;Type Check - adds new grammar for type expressions, type environment API, type printing,
 ;and type-of which is similar to our value-of and value-of-stmt.
-;@author [Michael Gephart]
+;@author [Michael Gephart, Reyna Johnson]
 ;Instructor [Dr. Brylow]
-;TA-BOT:MAILTO [michael.gephart@marquette.edu]
+;TA-BOT:MAILTO [michael.gephart@marquette.edu, reyna.johnson@marquette.edu]
 #lang eopl
 
 
